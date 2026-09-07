@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: (C) 2026 Gavin John
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+version = 1
+SPDX-PackageName = "calgebra-lints"
+SPDX-PackageSupplier = "Gavin John <gavinnjohn@gmail.com>"
+SPDX-PackageDownloadLocation = "https://github.com/Pandapip1/calgebra-lints"
+
+# The verbatim license text carries no header of its own; LICENSES/ holds the
+# same text as the machine-readable copy REUSE reads.
+[[annotations]]
+path = "LICENSE"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "(C) 2026 Gavin John"
+SPDX-License-Identifier = "GPL-3.0-or-later"
