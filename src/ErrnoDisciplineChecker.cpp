@@ -214,11 +214,42 @@ static const IdentifierInfo *threadTokenFamilyFromAnnotation(
   return nullptr;
 }
 
+/* The fully generic sibling of threadTokenFamilyFromAnnotation above:
+ * visits every annotation matching Prefix on every redecl, rather than
+ * stopping at the first, and hands each resolved family to Callback in
+ * turn. This is what lets the generic require/grant/drop pass below (see
+ * ErrnoDisciplineChecker::checkPreCall/checkPostCall) enforce
+ * grants_thread_token/requires_thread_token/drops_thread_token/
+ * requires_thread_token_absent for an arbitrary, caller-named family --
+ * not just errno_grounds -- since a function may reasonably declare more
+ * than one such fact (e.g. a function requiring both mode64_token and
+ * some unrelated family), and the errno-specific call sites above only
+ * ever needed the first match. */
+template <typename Callback>
+static void forEachThreadTokenFamily(const FunctionDecl *Function,
+                                     StringRef Prefix, Callback &&Fn) {
+  if (!Function)
+    return;
+  for (const FunctionDecl *Redecl : Function->redecls())
+    for (const AnnotateAttr *Attribute :
+        Redecl->specific_attrs<AnnotateAttr>()) {
+      StringRef Text = Attribute->getAnnotation();
+      if (Text.consume_front(Prefix) && !Text.empty())
+        Fn(&Function->getASTContext().Idents.get(Text));
+    }
+}
+
 class ErrnoDisciplineChecker
-    : public Checker<check::PostCall, check::PreStmt<BinaryOperator>,
+    : public Checker<check::PreCall, check::PostCall,
+                     check::PreStmt<BinaryOperator>,
                      check::PreStmt<UnaryOperator>, check::BranchCondition,
                      eval::Assume, check::BeginFunction> {
   mutable std::unique_ptr<BugType> BT;
+  /* Distinct from BT above: BT's messages are specifically about errno
+   * discipline ("Unproven errno discipline"); this is for the generic
+   * thread-token require/grant/drop pass below, whose violations are
+   * about an arbitrary caller-named family, not errno at all. */
+  mutable std::unique_ptr<BugType> TokenBT;
 
   /* Functions this codebase's own implementation proves capable of
    * setting errno as a side effect, grounded against this tree (not
@@ -680,21 +711,129 @@ class ErrnoDisciplineChecker
     C.emitReport(std::move(Report));
   }
 
+  /* The generic sibling of report() above, for the family-agnostic
+   * grants_thread_token/requires_thread_token/drops_thread_token/
+   * requires_thread_token_absent pass -- distinct BugType (TokenBT, not
+   * BT) so these read as their own diagnostic category rather than
+   * appearing to be errno-specific findings. */
+  void reportTokenDiscipline(StringRef FamilyName, bool RequiredAbsent,
+                             const CallEvent &Call, ProgramStateRef State,
+                             CheckerContext &C) const {
+    const Expr *Origin = Call.getOriginExpr();
+    if (!Origin)
+      return;
+    ExplodedNode *Node = C.generateNonFatalErrorNode(State);
+    if (!Node)
+      return;
+    if (!TokenBT)
+      TokenBT = std::make_unique<BugType>(this, "Thread-scoped token discipline",
+                                          categories::LogicError);
+    std::string Message =
+        (llvm::Twine("calling '") + calleeName(Call) +
+         "' requires thread-scoped token '" + FamilyName + "' to be " +
+         (RequiredAbsent ? "absent" : "held") +
+         " on this path, but it is " + (RequiredAbsent ? "held" : "absent"))
+            .str();
+    auto Report =
+        std::make_unique<PathSensitiveBugReport>(*TokenBT, Message, Node);
+    Report->addRange(Origin->getSourceRange());
+    C.emitReport(std::move(Report));
+  }
+
+  static StringRef calleeName(const CallEvent &Call) {
+    const auto *Function = dyn_cast_or_null<FunctionDecl>(Call.getDecl());
+    return Function && Function->getIdentifier() ? Function->getName()
+                                                  : "<unknown>";
+  }
+
 public:
+  /* The generic require/require-absent half of the family-agnostic
+   * thread-token pass: for any called function carrying
+   * requires_thread_token(Family) or requires_thread_token_absent(Family)
+   * -- for any Family, supplied entirely by the annotation text, not
+   * hardcoded here -- checks the current path's ThreadCapabilityMap state
+   * for that family and reports if the call's precondition isn't met.
+   * errno_grounds is deliberately skipped: it already has its own,
+   * more precisely located check (at the point errno is actually read,
+   * in checkPreStmt(UnaryOperator) below) with its own established test
+   * coverage, and this generic pass exists to cover every OTHER family a
+   * consuming project names, not to duplicate that one. */
+  void checkPreCall(const CallEvent &Call, CheckerContext &C) const {
+    const auto *Function = dyn_cast_or_null<FunctionDecl>(Call.getDecl());
+    if (!Function)
+      return;
+    const IdentifierInfo *ErrnoFamily = errnoGroundsFamily(C.getASTContext());
+    ProgramStateRef State = C.getState();
+
+    forEachThreadTokenFamily(
+        Function, "requires_thread_token:", [&](const IdentifierInfo *Family) {
+          if (Family == ErrnoFamily)
+            return;
+          TokenTransition Transition =
+              applyTokenOperation(threadTokenState(State, Family),
+                                  TokenOperation::Require);
+          if (contains(Transition.Events, TokenEvent::MissingRequired))
+            reportTokenDiscipline(Family->getName(), /*RequiredAbsent=*/false,
+                                 Call, State, C);
+        });
+
+    forEachThreadTokenFamily(
+        Function, "requires_thread_token_absent:",
+        [&](const IdentifierInfo *Family) {
+          TokenTransition Transition =
+              applyTokenOperation(threadTokenState(State, Family),
+                                  TokenOperation::RequireAbsent);
+          if (contains(Transition.Events,
+                       TokenEvent::PresentWhenAbsentRequired))
+            reportTokenDiscipline(Family->getName(), /*RequiredAbsent=*/true,
+                                 Call, State, C);
+        });
+  }
+
   void checkPostCall(const CallEvent &Call, CheckerContext &C) const {
-    if (!isErrnoCapable(Call))
-      return;
-    const Stmt *Statement = Call.getOriginExpr();
-    if (!Statement)
-      return;
-    ProgramStateRef State =
-        C.getState()->set<CallSlot>(SlotLastCapable, Statement);
-    SymbolRef Symbol = Call.getReturnValue().getAsSymbol(true);
-    if (Symbol)
-      State = State->set<ErrnoSetterOf>(Symbol, Statement);
-    State = grantThreadDuplicable(State,
-                                  errnoGroundsFamily(C.getASTContext()));
-    C.addTransition(State);
+    ProgramStateRef State = C.getState();
+    bool Changed = false;
+
+    if (isErrnoCapable(Call)) {
+      const Stmt *Statement = Call.getOriginExpr();
+      if (Statement) {
+        State = State->set<CallSlot>(SlotLastCapable, Statement);
+        SymbolRef Symbol = Call.getReturnValue().getAsSymbol(true);
+        if (Symbol)
+          State = State->set<ErrnoSetterOf>(Symbol, Statement);
+        State = grantThreadDuplicable(State,
+                                      errnoGroundsFamily(C.getASTContext()));
+        Changed = true;
+      }
+    }
+
+    /* The generic grant/drop half of the family-agnostic thread-token
+     * pass -- see checkPreCall's own comment for why errno_grounds is
+     * skipped here (it's already granted, above, via the errno-specific
+     * path with its own established test coverage). */
+    if (const auto *Function = dyn_cast_or_null<FunctionDecl>(Call.getDecl())) {
+      const IdentifierInfo *ErrnoFamily = errnoGroundsFamily(C.getASTContext());
+
+      forEachThreadTokenFamily(
+          Function, "grants_thread_token:", [&](const IdentifierInfo *Family) {
+            if (Family == ErrnoFamily)
+              return;
+            State = grantThreadDuplicable(State, Family);
+            Changed = true;
+          });
+
+      forEachThreadTokenFamily(
+          Function, "drops_thread_token:", [&](const IdentifierInfo *Family) {
+            TokenTransition Transition = applyTokenOperation(
+                threadTokenState(State, Family), TokenOperation::Drop);
+            State = State->set<ThreadCapabilityMap>(
+                Family, fromTokenState(Transition.After));
+            Changed = true;
+          });
+    }
+
+    if (Changed)
+      C.addTransition(State);
   }
 
   /* Shared by both checkPreStmt overloads below: if Symbol is a capable
@@ -1138,6 +1277,9 @@ extern "C" void clang_registerCheckers(CheckerRegistry &Registry) {
   Registry.addChecker<ErrnoDisciplineChecker>(
       "ntlibc.ErrnoDiscipline",
       "Proves errno is read only from the call whose failure it reports, "
-      "and only after some call or assignment could have set it",
+      "and only after some call or assignment could have set it; also "
+      "enforces grants_thread_token/requires_thread_token/"
+      "drops_thread_token/requires_thread_token_absent generically, for "
+      "any caller-named thread-scoped token family, not just errno_grounds",
       "");
 }

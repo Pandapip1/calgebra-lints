@@ -129,6 +129,25 @@
 	__ownership_attr("grants_thread_token:" #token_name)
 #define requires_thread_token(token_name) \
 	__ownership_attr("requires_thread_token:" #token_name)
+/* The negative-space counterparts of the two verbs above. A prior
+ * attempt at requires_thread_token_absent specifically for errno_pending
+ * (tracking whether the single most-recently-diagnosed capable call is
+ * still the most recent one at all) needed per-call identity a
+ * family-only key structurally cannot carry -- see
+ * tools/clang/ErrnoDisciplineChecker.cpp's own design note on
+ * CarrierCapabilityKind/ThreadCapabilityMap for that adversarial case.
+ * That specific use case is still unsound and remains unimplemented for
+ * it. These two verbs are sound for the general case, though: any fact
+ * that is purely "is this currently held on this path at all" (not "was
+ * it *this particular* call that most recently established it") has no
+ * such adversarial case, because there is no competing identity to
+ * confuse it with -- ntlibc.ErrnoDiscipline's own generic thread-token
+ * pass (distinct from its errno_grounds-specific one) uses exactly this
+ * for arbitrary caller-supplied families. */
+#define drops_thread_token(token_name) \
+	__ownership_attr("drops_thread_token:" #token_name)
+#define requires_thread_token_absent(token_name) \
+	__ownership_attr("requires_thread_token_absent:" #token_name)
 #define withtok(token_name) \
 	__ownership_attr("withtok:" #token_name)
 #define elements_withtok(token_name, extent_name) \

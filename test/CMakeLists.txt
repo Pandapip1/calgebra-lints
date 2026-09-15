@@ -139,6 +139,9 @@ add_fixture_suite(abi-zeroinit PLUGIN calgebra-abi-zeroinit-checker
 add_fixture_suite(errno-discipline PLUGIN calgebra-errno-discipline-checker
   CHECKERS ntlibc.ErrnoDiscipline TAGS ntlibc.ErrnoDiscipline
   MARKER errno-discipline-expect)
+add_fixture_suite(thread-token PLUGIN calgebra-errno-discipline-checker
+  CHECKERS ntlibc.ErrnoDiscipline TAGS ntlibc.ErrnoDiscipline
+  MARKER thread-token-expect)
 add_fixture_suite(reentrancy PLUGIN calgebra-reentrancy-checker
   CHECKERS ntlibc.Reentrancy TAGS ntlibc.Reentrancy MARKER reentrancy-expect)
 add_fixture_suite(purity PLUGIN calgebra-purity-checker
