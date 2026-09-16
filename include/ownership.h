@@ -166,6 +166,19 @@
 	__ownership_attr("drop:" #token_name)
 #define consume_if_nonnull_return(token_name) \
 	__ownership_attr("consume_if_nonnull_return:" #token_name)
+
+/* Declares that this function reports success with a NONZERO return, not a
+ * zero one. Read by the lock-discipline checker, which otherwise assumes
+ * POSIX's convention when deciding which branch of a call actually
+ * acquired or released.
+ *
+ * For try-locks built on a compare-and-swap, where 1 means "the lock was
+ * free and is now held". Without it the two branches are swapped, and the
+ * failing iteration of a `while (!try_acquire(l))` loop is taken for a
+ * successful acquisition -- making the next iteration look like acquiring
+ * a lock that is already held. */
+#define lock_succeeds_nonzero \
+	__attribute__((annotate("ntlibc_lock_succeeds_nonzero")))
 #define construct(handle_name) \
 	__ownership_attr("construct:" #handle_name)
 #define destroy(handle_name) \

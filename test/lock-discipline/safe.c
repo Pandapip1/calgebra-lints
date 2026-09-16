@@ -89,3 +89,37 @@ void cond_wait_cleanup(void *argument) {
     cleanup->mutex_held = 1;
   }
 }
+
+/* A try-lock, whose success is a NONZERO return -- the opposite of POSIX.
+ * lock_succeeds_nonzero is what tells the checker which branch of the call
+ * actually acquired; without it the two are swapped, and the failing
+ * iteration of the retry loop below is taken for a successful acquisition,
+ * making the next iteration look like acquiring an already-held lock.
+ *
+ * Modelled on a real freestanding kernel's only locking primitive: a
+ * compare-and-swap try-lock with no blocking form at all, where every
+ * caller is expected to try once and yield on failure. */
+tokdef trylock_unheld;
+tokdef trylock_held lock_held;
+
+lock_succeeds_nonzero
+int try_acquire(mutex_t * handle(mutex) consume(trylock_unheld)
+                grant(trylock_held));
+void try_release(mutex_t * handle(mutex) consume(trylock_held)
+                 grant(trylock_unheld));
+void yield_until_interrupt(void);
+
+/* The retry loop this whole qualifier exists for: try, and on failure do
+ * something that yields rather than spinning. Each failed attempt leaves
+ * the lock exactly as unheld as it found it. */
+void trylock_retry_loop(mutex_t *mutex) {
+  while (!try_acquire(mutex))
+    yield_until_interrupt();
+  try_release(mutex);
+}
+
+/* A single attempt, released only on the branch that actually took it. */
+void trylock_single_attempt(mutex_t *mutex) {
+  if (try_acquire(mutex))
+    try_release(mutex);
+}

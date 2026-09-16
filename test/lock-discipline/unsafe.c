@@ -75,3 +75,24 @@ int cond_wait(void *cond, mutex_t *mutex, void *absolute) {
     return error;
   return pthread_mutex_lock(mutex); /* lock-discipline-expect */
 }
+
+/* Same try-lock as safe.c, misused. */
+tokdef trylock_unheld;
+tokdef trylock_held lock_held;
+
+lock_succeeds_nonzero
+int try_acquire(mutex_t * handle(mutex) consume(trylock_unheld)
+                grant(trylock_held));
+void try_release(mutex_t * handle(mutex) consume(trylock_held)
+                 grant(trylock_unheld));
+
+/* Two distinct faults, one per branch, and the polarity declaration is what
+ * makes both visible. Releasing where the try FAILED is a release of a lock
+ * this branch does not hold; and where it SUCCEEDED the release is skipped
+ * entirely, so the function returns still holding it. Read with the
+ * polarity swapped, each of these would land on the other branch and the
+ * pair would look like ordinary correct code. */
+void trylock_release_on_failure(mutex_t *mutex) {
+  if (!try_acquire(mutex))
+    try_release(mutex); /* lock-discipline-expect */
+} /* lock-discipline-expect */

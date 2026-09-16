@@ -200,6 +200,29 @@ class LockDisciplineChecker
         .has_value();
   }
 
+  // True if the CALLEE carries ntlibc_lock_succeeds_nonzero: its success is
+  // a nonzero return, not a zero one.
+  //
+  // checkPostCall splits on the return value to decide whether an
+  // acquisition actually happened, and assumed POSIX's convention
+  // throughout -- pthread_mutex_lock and friends return 0 on success. A
+  // try-lock built on a compare-and-swap reports the opposite: 1 means the
+  // lock was free and is now held, 0 means someone else has it. Without a
+  // way to say so, such a primitive gets its two branches swapped, and the
+  // failing iteration of an ordinary `while (!try_acquire(l))` retry loop
+  // is recorded as a successful acquisition -- so the next iteration is
+  // reported as acquiring a lock already held. Observed exactly that way on
+  // a real tree before this existed.
+  static bool succeedsNonzero(const CallEvent &Call) {
+    const auto *Function = dyn_cast_or_null<FunctionDecl>(Call.getDecl());
+    if (!Function)
+      return false;
+    for (const auto *Attr : Function->specific_attrs<AnnotateAttr>())
+      if (Attr->getAnnotation() == "ntlibc_lock_succeeds_nonzero")
+        return true;
+    return false;
+  }
+
   // True if Call's own CallExpr is (modulo enclosing parentheses and
   // implicit casts) the return statement's own operand -- i.e. the
   // surrounding function reads exactly like `return
@@ -349,10 +372,15 @@ public:
         Call.getReturnValue().getAs<DefinedOrUnknownSVal>();
     if (!Return)
       return;
-    DefinedOrUnknownSVal Success = C.getSValBuilder().evalEQ(
+    DefinedOrUnknownSVal ReturnedZero = C.getSValBuilder().evalEQ(
         C.getState(), *Return,
         C.getSValBuilder().makeZeroVal(Function->getReturnType()));
-    auto [Succeeded, Failed] = C.getState()->assume(Success);
+    auto [Zero, Nonzero] = C.getState()->assume(ReturnedZero);
+    // Which of those two branches actually means "it worked". Zero by
+    // default, matching POSIX and every pthread entry point; the other way
+    // round for a primitive carrying lock_succeeds_nonzero.
+    ProgramStateRef Succeeded = succeedsNonzero(Call) ? Nonzero : Zero;
+    ProgramStateRef Failed = succeedsNonzero(Call) ? Zero : Nonzero;
     if (Succeeded) {
       bool Acquired = Protocol->Operation == LockOperation::AcquireRead ||
                      Protocol->Operation == LockOperation::AcquireWrite;
